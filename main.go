@@ -231,6 +231,9 @@ func fetchImage() error {
 func cropImage(r image.Rectangle) error {
 
 	srcimg, _, err := image.Decode(&buf)
+	if err != nil {
+		return err
+	}
 
 	memimg := image.NewRGBA(srcimg.Bounds())
 
@@ -272,6 +275,9 @@ func evaluateImageJSON(token string) (visionResponse, error) {
 	body, _ := ioutil.ReadAll(resp.Body)
 	var response visionResponse
 	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return response, err
+	}
 
 	if cacheImage != "" {
 		ioutil.WriteFile(cacheImage, b, 0644)
