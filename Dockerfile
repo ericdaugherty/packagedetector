@@ -1,4 +1,4 @@
-FROM golang:1.11 as builder
+FROM golang:1.12 as builder
 
 # Set the working directory outside $GOPATH to enable the support for modules.
 WORKDIR /src

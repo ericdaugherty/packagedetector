@@ -17,38 +17,184 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"strings"
 	"time"
 
+	firebase "firebase.google.com/go"
+	"firebase.google.com/go/messaging"
 	motion "github.com/ericdaugherty/unifi-nvr-motiondetection"
+	"google.golang.org/api/option"
 	gomail "gopkg.in/gomail.v2"
+	yaml "gopkg.in/yaml.v2"
 )
 
-var imageURL string
-var rect string
-var interval int
-var motionLogPath string
-var cameraID string
-var gAuthJSONPath string
-var gVisionURL string
-var cacheImage string
-var notifyClass string
-var sleepHour int
-var wakeHour int
+var configPath string
 
-var lastEmailSent time.Time
-var emailFrom string
-var emailTo string
-var emailServer string
-var emailPort int
-var emailUser string
-var emailPass string
-var emailMuteDuration int
-var emailOnStartup bool
-
+var config *configuration
 var r image.Rectangle
 var buf bytes.Buffer
+var fcmClient *messaging.Client
+var lastNotificationSent time.Time
+
+type configuration struct {
+	Run    runCfg
+	Motion motionCfg
+	Image  imageCfg
+	Vision visionCfg
+	Email  emailCfg
+	Push   pushCfg
+}
+
+type runCfg struct {
+	Interval          int
+	SleepHour         int
+	WakeHour          int
+	NotifyOnStart     bool
+	NotifyMuteMinutes int
+}
+
+type imageCfg struct {
+	URL       string
+	CacheFile string
+	Rect      rectCfg
+}
+
+type rectCfg struct {
+	X1 int
+	Y1 int
+	X2 int
+	Y2 int
+}
+
+type motionCfg struct {
+	LogPath  string
+	CameraID string
+}
+
+type visionCfg struct {
+	AuthFile     string
+	URL          string
+	PackageLabel string
+}
+
+type emailCfg struct {
+	From   string
+	To     []string
+	Server string
+	Port   int
+	User   string
+	Pass   string
+}
+
+type pushCfg struct {
+	Key   string
+	Topic string
+}
+
+func (r runCfg) run(ctx context.Context) {
+	if r.Interval > 0 {
+		ticker := time.NewTicker(time.Duration(r.Interval) * time.Minute)
+		for {
+			select {
+			case <-ticker.C:
+				if r.isAwake() {
+					processImage(ctx, false)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	} else {
+		select {
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (r runCfg) isAwake() bool {
+	now := time.Now()
+	hour := now.Hour()
+
+	if (r.SleepHour > r.WakeHour) && (hour < r.SleepHour && hour >= r.WakeHour) {
+		return true
+	} else if (r.SleepHour < r.WakeHour) && (hour < r.SleepHour || hour >= r.WakeHour) { // Ex sleep 1, wake 7
+		return true
+	} else if r.SleepHour == r.WakeHour { // Both the same, so don't sleep.
+		return true
+	}
+	return false
+}
+
+func (i imageCfg) isCropSpecified() bool {
+	return i.Rect.X1 > 0 ||
+		i.Rect.Y1 > 0 ||
+		i.Rect.X2 > 0 ||
+		i.Rect.Y2 > 0
+}
+
+func (i imageCfg) initialize() {
+	if i.CacheFile == "" {
+		i.CacheFile = "./img.jpg"
+	}
+
+	if i.URL == "" {
+		log.Fatalln("Please specify a valid imageURL in the configuration file.")
+	}
+
+	// Check if Rect is specified. If so, setup image.Rectangle.
+	if i.isCropSpecified() {
+		r = image.Rect(i.Rect.X1, i.Rect.Y1, i.Rect.X2, i.Rect.Y2)
+	}
+}
+
+func (m motionCfg) initialize(ctx context.Context) {
+	if m.LogPath != "" {
+		if m.CameraID == "" {
+			log.Fatal("The cameraID parameter must be set if the motionLogPath is present.")
+		}
+
+		md, err := motion.DetectMotion(m.LogPath)
+		if err != nil {
+			log.Fatal("Unable to open the motion.log file: "+m.LogPath, err.Error())
+		}
+		md.AddStopMotionCallback(m.CameraID, func(string, string) {
+			if config.Run.isAwake() {
+				processImage(ctx, false)
+			}
+		})
+	}
+}
+
+func (v visionCfg) initialize() {
+	if config.Vision.AuthFile == "" || config.Vision.URL == "" {
+		log.Fatalln("Configuration must contain values for vision: authfile and vision: url")
+	}
+}
+
+func (e emailCfg) initialize() {
+	if e.Port == 0 {
+		e.Port = 587
+	}
+}
+
+func (p pushCfg) initialize(ctx context.Context) {
+	if p.Key != "" {
+		log.Println("Initializing FCM.")
+		if p.Topic == "" {
+			log.Fatal("If push: key is provied, push: topic must also be provided.")
+		}
+		opt := option.WithCredentialsFile(p.Key)
+		app, err := firebase.NewApp(ctx, nil, opt)
+		if err != nil {
+			log.Fatalln("Error initializing Firebase Cloud SDK.", err.Error())
+		}
+		fcmClient, err = app.Messaging(ctx)
+		if err != nil {
+			log.Fatalln("Error initializing Firebase Cloud Messaging.", err.Error())
+		}
+	}
+}
 
 type visionRequest struct {
 	Payload struct {
@@ -68,54 +214,34 @@ type visionResponse struct {
 }
 
 func init() {
-	flag.StringVar(&imageURL, "imageURL", "", "The URL of the image to fetch.")
-	flag.StringVar(&rect, "rect", "", "The x/y coordinates that define the rectangle to use to crop in the form of x,y,x,y")
-	flag.IntVar(&interval, "interval", 0, "The interval, in minutes, between executions.")
-	flag.StringVar(&motionLogPath, "motionLog", "", "The path to the NVR motion.log file.")
-	flag.StringVar(&cameraID, "cameraID", "", "The camera ID of the camera to monitor for motion.")
-	flag.StringVar(&gAuthJSONPath, "gAuthJSON", "", "Path to the Google Cloud JSON Auth file.")
-	flag.StringVar(&gVisionURL, "gVisionURL", "", "Google Service URL to query for image evaluation.")
-	flag.StringVar(&cacheImage, "cacheImage", "img.jpg", "The current image will be written to disk as this filename.")
-	flag.StringVar(&notifyClass, "notifyClass", "package", "If the image label matches this value, a notification will be sent.")
-	flag.IntVar(&sleepHour, "sleepHour", 0, "The hour to pause image capture (0-23)")
-	flag.IntVar(&wakeHour, "wakeHour", 0, "The hour to resume image capture (0-23)")
-	flag.StringVar(&emailFrom, "emailFrom", "", "The email address to use for the FROM setting.")
-	flag.StringVar(&emailTo, "emailTo", "", "The email address to use for the TO setting.")
-	flag.StringVar(&emailServer, "emailServer", "", "The SMTP Server to use to send the email.")
-	flag.IntVar(&emailPort, "emailServerPort", 587, "The port to use to connect to the SMTP Server")
-	flag.StringVar(&emailUser, "emailUser", "", "The SMTP Username to use, if needed.")
-	flag.StringVar(&emailPass, "emailPass", "", "The SMTP Password to use, if needed.")
-	flag.IntVar(&emailMuteDuration, "emailMuteMinutes", 60, "The amount of time to wait between sending emails.")
-	flag.BoolVar(&emailOnStartup, "emailOnStart", false, "Send an email on startup when this flag is present.")
+	flag.StringVar(&configPath, "c", "./pd.yaml", "The path to the config file.")
 }
 
 func main() {
 
 	flag.Parse()
 
-	if imageURL == "" || gAuthJSONPath == "" || gVisionURL == "" {
-		flag.Usage()
-		os.Exit(1)
+	// Load the Configuration
+	config = &configuration{}
+	b, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		log.Fatalln("Unable to load configuration file:", configPath, err)
 	}
-
-	if rect != "" {
-		rpoints := strings.Split(rect, ",")
-		if len(rpoints) != 4 {
-			log.Fatal("rect flag not in the form of x,y,x,y")
-		}
-		var ripoints [4]int
-		for i, num := range rpoints {
-			v, err := strconv.Atoi(num)
-			if err != nil {
-				log.Fatal("Error converting number " + num + " to int.")
-			}
-			ripoints[i] = v
-		}
-		r = image.Rect(ripoints[0], ripoints[1], ripoints[2], ripoints[3])
+	err = yaml.UnmarshalStrict(b, config)
+	if err != nil {
+		log.Fatalln("Unable to parse configuration file.", err)
 	}
 
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
+
+	config.Image.initialize()
+
+	config.Vision.initialize()
+
+	config.Email.initialize()
+
+	config.Push.initialize(ctx)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -132,48 +258,16 @@ func main() {
 	}()
 
 	// Check the image before starting our monitoring/loop and force email if specified.
-	processImage(emailOnStartup)
+	processImage(ctx, config.Run.NotifyOnStart)
 
-	// If the motionLogPath is set,
-	if motionLogPath != "" {
-		if cameraID == "" {
-			log.Fatal("The cameraID parameter must be set if the motionLogPath is present.")
-		}
-
-		md, err := motion.DetectMotion(motionLogPath)
-		if err != nil {
-			log.Fatal("Unable to open the motion.log file: "+motionLogPath, err.Error())
-		}
-		md.AddStopMotionCallback(cameraID, func(string, string) {
-			if isAwake(time.Now(), sleepHour, wakeHour) {
-				processImage(false)
-			}
-		})
-	}
+	config.Motion.initialize(ctx)
 
 	log.Println("Running...")
 
-	if interval > 0 {
-		ticker := time.NewTicker(time.Duration(interval) * time.Minute)
-		for {
-			select {
-			case <-ticker.C:
-				if isAwake(time.Now(), sleepHour, wakeHour) {
-					processImage(false)
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	} else {
-		select {
-		case <-ctx.Done():
-			return
-		}
-	}
+	config.Run.run(ctx)
 }
 
-func processImage(forceEmail bool) {
+func processImage(ctx context.Context, forceNotify bool) {
 	token, err := getGoogleToken()
 	if err != nil {
 		log.Println("Unable to get Google Cloud Token. Error:", err.Error(), "StdOut:", token)
@@ -186,7 +280,7 @@ func processImage(forceEmail bool) {
 		return
 	}
 
-	if rect != "" {
+	if config.Image.isCropSpecified() {
 		err = cropImage(r)
 	}
 	if err != nil {
@@ -202,16 +296,29 @@ func processImage(forceEmail bool) {
 
 	for _, p := range resp.Payload {
 		log.Printf("Result: %v, Confidence: %f\n", p.DisplayName, p.Classification.Score)
-		if p.DisplayName == notifyClass || forceEmail {
-			if time.Now().After(lastEmailSent.Add(time.Duration(emailMuteDuration) * time.Minute)) {
-				emailResult("Package Received!", fmt.Sprintf("A package has been identified at the door with %f certainty", p.Classification.Score))
+		if p.DisplayName == config.Vision.PackageLabel {
+			if time.Now().After(lastNotificationSent.Add(time.Duration(config.Run.NotifyMuteMinutes) * time.Minute)) {
+				lastNotificationSent = time.Now()
+				if config.Email.Server != "" {
+					emailResult("Package Received!", fmt.Sprintf("A package has been identified at the door with %f certainty", p.Classification.Score))
+				}
+				if fcmClient != nil {
+					sendPushNotification(ctx, "Package Received", fmt.Sprintf("A package has been identified at the door with %f certainty", p.Classification.Score))
+				}
+			}
+		} else if forceNotify {
+			if config.Email.Server != "" {
+				emailResult("Package Monitor Restarted.", fmt.Sprintf("A %v has been identified at the door with %f certainty", p.DisplayName, p.Classification.Score))
+			}
+			if fcmClient != nil {
+				sendPushNotification(ctx, "Packing Monitor Restarted", fmt.Sprintf("A %v has been identified at the door with %f certainty", p.DisplayName, p.Classification.Score))
 			}
 		}
 	}
 }
 
 func fetchImage() error {
-	url := imageURL
+	url := config.Image.URL
 	buf.Reset()
 
 	response, err := http.Get(url)
@@ -257,7 +364,7 @@ func evaluateImageJSON(token string) (visionResponse, error) {
 		return visionResponse{}, err
 	}
 
-	req, err := http.NewRequest("POST", gVisionURL, bytes.NewBuffer(reqBytes))
+	req, err := http.NewRequest("POST", config.Vision.URL, bytes.NewBuffer(reqBytes))
 	if err != nil {
 		return visionResponse{}, err
 	}
@@ -279,9 +386,7 @@ func evaluateImageJSON(token string) (visionResponse, error) {
 		return response, err
 	}
 
-	if cacheImage != "" {
-		ioutil.WriteFile(cacheImage, b, 0644)
-	}
+	ioutil.WriteFile(config.Image.CacheFile, b, 0644)
 
 	return response, nil
 }
@@ -290,7 +395,7 @@ func getGoogleToken() (string, error) {
 	// Get Bearer Token
 	cmd := exec.Command("gcloud", "auth", "application-default", "print-access-token")
 	cmd.Env = append(os.Environ(),
-		"GOOGLE_APPLICATION_CREDENTIALS="+gAuthJSONPath,
+		"GOOGLE_APPLICATION_CREDENTIALS="+config.Vision.AuthFile,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -301,30 +406,38 @@ func getGoogleToken() (string, error) {
 }
 
 func emailResult(subject string, body string) {
+	e := config.Email
 	m := gomail.NewMessage()
-	m.SetHeader("From", emailFrom)
-	m.SetHeader("To", emailTo)
+	m.SetHeader("From", e.From)
+	for _, to := range e.To {
+		m.SetHeader("To", to)
+	}
 	m.SetHeader("Subject", subject)
 	m.SetBody("text/html", body)
-	m.Embed(cacheImage)
+	m.Embed(config.Image.CacheFile)
 
-	d := gomail.NewDialer(emailServer, emailPort, emailUser, emailPass)
+	d := gomail.NewDialer(e.Server, e.Port, e.User, e.Pass)
 
 	if err := d.DialAndSend(m); err != nil {
 		log.Println(err)
 		return
 	}
-	lastEmailSent = time.Now()
 }
 
-func isAwake(now time.Time, sleepHour int, wakeHour int) bool {
-	hour := now.Hour()
-	if (sleepHour > wakeHour) && (hour < sleepHour && hour >= wakeHour) {
-		return true
-	} else if (sleepHour < wakeHour) && (hour < sleepHour || hour >= wakeHour) { // Ex sleep 1, wake 7
-		return true
-	} else if sleepHour == wakeHour { // Both the same, so don't sleep.
-		return true
+func sendPushNotification(ctx context.Context, title string, body string) {
+	message := &messaging.Message{
+		Topic: config.Push.Topic,
+		Notification: &messaging.Notification{
+			Title: title,
+			Body:  body,
+		},
+		Data: map[string]string{
+			"imageURL": "S3SOMETHINGSOMETIMG",
+		}}
+
+	r, err := fcmClient.Send(ctx, message)
+	if err != nil {
+		log.Println("Error sending Push Notification.", err.Error())
 	}
-	return false
+	log.Println("Sent Push Notification. r:", r)
 }

@@ -1,0 +1,51 @@
+run:
+  # To specifiy a timed interval, uncomment and specify a number (minutes) between checks.
+  #interval: 10
+  # The hour (0-23) the package detector should stop for the day. Comment out this and wakehour to run continuously.
+  sleephour: 22
+  # The hour (0-23) the package detector should start for the day. Comment out this and sleephour to run continuously.
+  wakehour: 7
+  # Send a notification (email and/or push) on startup even if there is no package.
+  notifyonstart: true
+  # Amount of time to mute notifications after a package is detected.
+  notifymuteminutes: 60
+
+motion:
+  logpath: /nvr/motion.log
+  cameraid: AABBCCDD
+
+image:
+  # URL to use to query the image from the camera. URL should return an image file.
+  url: http://192.168.1.10/snap.jpeg
+  # The filename/path to use to cache the image. If omitted ./img.jpg will be used.
+  cachefile: img.jpeg
+  # Rect defines the image points to use to crop the image. Cropped image will be from x1,y1 to x2,y2.
+  rect:
+    x1: 0
+    y1: 0
+    x2: 600
+    y2: 400
+
+# Configuration for accessing Google Vision
+vision:
+  authfile: /pd/package-detector-abc1235abc123.json
+  url: https://automl.googleapis.com/v1beta1/projects/package-detector/locations/us-central1/models/ICN1122334455667788:predict
+  packagelabel: package
+
+# Specify the email configuration to enable an email whenever motion is detected.
+email:
+  from: john@example.com
+  to:
+    - jane@example.com
+    - tom@example.com
+  server: smtp.example.com
+  port: 587
+  user: jane
+  pass: secret
+
+# Firebase Cloud Messaging Config
+push:
+  # File path to the Firebase 
+  key: /pd/project-abc123.json
+  topic: packagedetection
+  
