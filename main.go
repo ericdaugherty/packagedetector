@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -233,6 +232,8 @@ type visionResponse struct {
 type firestorePackage struct {
 	Title         string
 	Body          string
+	Score         float64
+	Label         string
 	ImageBucket   string
 	ImageFilename string
 	DateTime      time.Time
@@ -325,18 +326,18 @@ func processImage(ctx context.Context, forceNotify bool) {
 			if time.Now().After(lastNotificationSent.Add(time.Duration(config.Run.NotifyMuteMinutes) * time.Minute)) {
 				lastNotificationSent = time.Now()
 				if config.Email.Server != "" {
-					emailResult("Package Received!", fmt.Sprintf("A package has been identified at the door with %f certainty", p.Classification.Score))
+					emailResult("Package Received!", fmt.Sprintf("A new package delivery was detected."))
 				}
 				if fcmClient != nil {
-					sendPushNotification(ctx, "Package Received", fmt.Sprintf("A package has been identified at the door with %f certainty", p.Classification.Score))
+					sendPushNotification(ctx, "Package Received", fmt.Sprintf("A new package delivery was detected."), p.Classification.Score, p.DisplayName)
 				}
 			}
 		} else if forceNotify {
 			if config.Email.Server != "" {
-				emailResult("Package Monitor Restarted.", fmt.Sprintf("A %v has been identified at the door with %f certainty", p.DisplayName, p.Classification.Score))
+				emailResult("Package Monitor Restarted.", "The Package Monitor server has resarted successfully.")
 			}
 			if fcmClient != nil {
-				sendPushNotification(ctx, "Packing Monitor Restarted", fmt.Sprintf("A %v has been identified at the door with %f certainty", p.DisplayName, p.Classification.Score))
+				sendPushNotification(ctx, "Package Monitor Restarted", "The Package Monitor server has resarted successfully.", p.Classification.Score, p.DisplayName)
 			}
 		}
 	}
@@ -449,7 +450,7 @@ func emailResult(subject string, body string) {
 	}
 }
 
-func sendPushNotification(ctx context.Context, title string, body string) {
+func sendPushNotification(ctx context.Context, title string, body string, score float64, label string) {
 	p := config.Push
 
 	// Store image in Firebase Storage
@@ -478,6 +479,8 @@ func sendPushNotification(ctx context.Context, title string, body string) {
 	packageDb := firestorePackage{
 		Title:         title,
 		Body:          body,
+		Label:         label,
+		Score:         score,
 		ImageBucket:   p.Bucket,
 		ImageFilename: fileName,
 		DateTime:      now,
@@ -489,21 +492,17 @@ func sendPushNotification(ctx context.Context, title string, body string) {
 		log.Println("Error writing to Firebase Cloud Firestore.", err)
 	}
 
-	// if err := fdbClient.NewRef(dbKey).Set(ctx, packageDb); err != nil {
-	// 	log.Println("Error writing to Firebase Cloud Firestore.", err)
-	// }
-
 	message := &messaging.Message{
 		Topic: config.Push.Topic,
 		Notification: &messaging.Notification{
 			Title: title,
 			Body:  body,
 		},
-		Data: map[string]string{
-			"bucket":   p.Bucket,
-			"filename": fileName,
-			"time":     strconv.FormatInt(time.Now().Unix(), 10),
-		},
+		// Data: map[string]string{
+		// 	"bucket":   p.Bucket,
+		// 	"filename": fileName,
+		// 	"time":     strconv.FormatInt(time.Now().Unix(), 10),
+		// },
 		APNS: &messaging.APNSConfig{
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
