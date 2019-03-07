@@ -17,16 +17,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path"
 	"strings"
 	"time"
 
-	"cloud.google.com/go/firestore"
-	firebase "firebase.google.com/go"
-	"firebase.google.com/go/messaging"
-	"firebase.google.com/go/storage"
 	motion "github.com/ericdaugherty/unifi-nvr-motiondetection"
-	"google.golang.org/api/option"
 	gomail "gopkg.in/gomail.v2"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -36,9 +30,6 @@ var configPath string
 var config *configuration
 var r image.Rectangle
 var buf bytes.Buffer
-var fstClient *storage.Client
-var fdbClient *firestore.Client
-var fcmClient *messaging.Client
 var lastNotificationSent time.Time
 
 type configuration struct {
@@ -47,7 +38,6 @@ type configuration struct {
 	Image   imageCfg
 	Vision  visionCfg
 	Email   emailCfg
-	Push    pushCfg
 	WebHook webhookCfg
 }
 
@@ -94,14 +84,6 @@ type emailCfg struct {
 
 type webhookCfg struct {
 	URL string
-}
-
-type pushCfg struct {
-	Key        string
-	Topic      string
-	Bucket     string
-	Folder     string
-	Collection string
 }
 
 func (r runCfg) run(ctx context.Context) {
@@ -191,35 +173,7 @@ func (e emailCfg) initialize() {
 	}
 }
 
-func (p pushCfg) initialize(ctx context.Context) {
-	if p.Key != "" {
-		log.Println("Initializing FCM.")
-		if p.Topic == "" {
-			log.Fatal("If push: key is provied, push: topic must also be provided.")
-		}
-		opt := option.WithCredentialsFile(p.Key)
-		firebaseApp, err := firebase.NewApp(ctx, nil, opt)
-		if err != nil {
-			log.Fatalln("Error initializing Firebase Cloud SDK.", err.Error())
-		}
-		fstClient, err = firebaseApp.Storage(ctx)
-		if err != nil {
-			log.Fatalln("Error initializing Firebase Storage.", err.Error())
-		}
-		fdbClient, err = firebaseApp.Firestore(ctx)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fcmClient, err = firebaseApp.Messaging(ctx)
-		if err != nil {
-			log.Fatalln("Error initializing Firebase Cloud Messaging.", err.Error())
-		}
-	}
-}
-
-func (w webhookCfg) initialize() {
-
-}
+func (w webhookCfg) initialize() {}
 
 type visionRequest struct {
 	Payload struct {
@@ -282,8 +236,6 @@ func main() {
 
 	config.Email.initialize()
 
-	config.Push.initialize(ctx)
-
 	config.WebHook.initialize()
 
 	c := make(chan os.Signal, 1)
@@ -345,9 +297,6 @@ func processImage(ctx context.Context, forceNotify bool) {
 				if config.Email.Server != "" {
 					emailResult("Package Received!", fmt.Sprintf("A new package delivery was detected."))
 				}
-				if fcmClient != nil {
-					sendPushNotification(ctx, "Package Received", fmt.Sprintf("A new package delivery was detected."), p.Classification.Score, p.DisplayName)
-				}
 				if config.WebHook.URL != "" {
 					sendWebHook(p.Classification.Score, p.DisplayName, buf.Bytes())
 				}
@@ -355,9 +304,6 @@ func processImage(ctx context.Context, forceNotify bool) {
 		} else if forceNotify {
 			if config.Email.Server != "" {
 				emailResult("Package Monitor Restarted.", "The Package Monitor server has restarted successfully.")
-			}
-			if fcmClient != nil {
-				sendPushNotification(ctx, "Package Monitor Restarted", "The Package Monitor server has restarted successfully.", p.Classification.Score, p.DisplayName)
 			}
 			if config.WebHook.URL != "" {
 				sendWebHook(p.Classification.Score, p.DisplayName, buf.Bytes())
@@ -471,75 +417,6 @@ func emailResult(subject string, body string) {
 		log.Println(err)
 		return
 	}
-}
-
-func sendPushNotification(ctx context.Context, title string, body string, score float64, label string) {
-	p := config.Push
-
-	// Store image in Firebase Storage
-	b, err := fstClient.Bucket(p.Bucket)
-	if err != nil {
-		log.Printf("Unable to upload image to Firebase Storage. Error getting Bucket %v.  Error: %v\n", p.Bucket, err)
-	}
-
-	fileName := time.Now().Format(time.RFC3339) + ".jpeg"
-	if p.Folder != "" {
-		fileName = path.Join(p.Folder, fileName)
-	}
-	obj := b.Object(fileName)
-	objWriter := obj.NewWriter(ctx)
-
-	if _, err = objWriter.Write(buf.Bytes()); err != nil {
-		log.Printf("Error writing to Firebase Storage Object.  Error: %v\n", err)
-	}
-
-	if err = objWriter.Close(); err != nil {
-		log.Printf("Error closing Firebase Storage Object Writer.  Error: %v\n", err)
-	}
-
-	// Store delivery in Firebase Cloud Firestore
-	now := time.Now()
-	packageDb := firestorePackage{
-		Title:         title,
-		Body:          body,
-		Label:         label,
-		Score:         score,
-		ImageBucket:   p.Bucket,
-		ImageFilename: fileName,
-		DateTime:      now,
-	}
-	dbKey := now.In(time.UTC).Format(time.RFC3339)
-	pkgColl := fdbClient.Collection(p.Collection)
-	doc := pkgColl.Doc(dbKey)
-	if _, err := doc.Create(ctx, packageDb); err != nil {
-		log.Println("Error writing to Firebase Cloud Firestore.", err)
-	}
-
-	message := &messaging.Message{
-		Topic: config.Push.Topic,
-		Notification: &messaging.Notification{
-			Title: title,
-			Body:  body,
-		},
-		// Data: map[string]string{
-		// 	"bucket":   p.Bucket,
-		// 	"filename": fileName,
-		// 	"time":     strconv.FormatInt(time.Now().Unix(), 10),
-		// },
-		APNS: &messaging.APNSConfig{
-			Payload: &messaging.APNSPayload{
-				Aps: &messaging.Aps{
-					Sound: "default",
-				},
-			},
-		},
-	}
-
-	r, err := fcmClient.Send(ctx, message)
-	if err != nil {
-		log.Println("Error sending Push Notification.", err.Error())
-	}
-	log.Println("Sent Push Notification. r:", r)
 }
 
 func sendWebHook(score float64, label string, image []byte) {
