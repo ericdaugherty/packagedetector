@@ -48,4 +48,7 @@ push:
   # File path to the Firebase 
   key: /pd/project-abc123.json
   topic: packagedetection
-  
+
+# Package Detector can post a JSON object to a URL representing each package detected
+webhook:
+  url: http://www.example.com/test

@@ -42,12 +42,13 @@ var fcmClient *messaging.Client
 var lastNotificationSent time.Time
 
 type configuration struct {
-	Run    runCfg
-	Motion motionCfg
-	Image  imageCfg
-	Vision visionCfg
-	Email  emailCfg
-	Push   pushCfg
+	Run     runCfg
+	Motion  motionCfg
+	Image   imageCfg
+	Vision  visionCfg
+	Email   emailCfg
+	Push    pushCfg
+	WebHook webhookCfg
 }
 
 type runCfg struct {
@@ -89,6 +90,10 @@ type emailCfg struct {
 	Port   int
 	User   string
 	Pass   string
+}
+
+type webhookCfg struct {
+	URL string
 }
 
 type pushCfg struct {
@@ -212,6 +217,10 @@ func (p pushCfg) initialize(ctx context.Context) {
 	}
 }
 
+func (w webhookCfg) initialize() {
+
+}
+
 type visionRequest struct {
 	Payload struct {
 		Image struct {
@@ -237,6 +246,12 @@ type firestorePackage struct {
 	ImageBucket   string
 	ImageFilename string
 	DateTime      time.Time
+}
+
+type webHookBody struct {
+	Score float64 `json:"score"`
+	Label string  `json:"label"`
+	Image string  `json:"image"`
 }
 
 func init() {
@@ -268,6 +283,8 @@ func main() {
 	config.Email.initialize()
 
 	config.Push.initialize(ctx)
+
+	config.WebHook.initialize()
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -331,13 +348,19 @@ func processImage(ctx context.Context, forceNotify bool) {
 				if fcmClient != nil {
 					sendPushNotification(ctx, "Package Received", fmt.Sprintf("A new package delivery was detected."), p.Classification.Score, p.DisplayName)
 				}
+				if config.WebHook.URL != "" {
+					sendWebHook(p.Classification.Score, p.DisplayName, buf.Bytes())
+				}
 			}
 		} else if forceNotify {
 			if config.Email.Server != "" {
-				emailResult("Package Monitor Restarted.", "The Package Monitor server has resarted successfully.")
+				emailResult("Package Monitor Restarted.", "The Package Monitor server has restarted successfully.")
 			}
 			if fcmClient != nil {
-				sendPushNotification(ctx, "Package Monitor Restarted", "The Package Monitor server has resarted successfully.", p.Classification.Score, p.DisplayName)
+				sendPushNotification(ctx, "Package Monitor Restarted", "The Package Monitor server has restarted successfully.", p.Classification.Score, p.DisplayName)
+			}
+			if config.WebHook.URL != "" {
+				sendWebHook(p.Classification.Score, p.DisplayName, buf.Bytes())
 			}
 		}
 	}
@@ -517,4 +540,35 @@ func sendPushNotification(ctx context.Context, title string, body string, score 
 		log.Println("Error sending Push Notification.", err.Error())
 	}
 	log.Println("Sent Push Notification. r:", r)
+}
+
+func sendWebHook(score float64, label string, image []byte) {
+
+	bodyStruct := &webHookBody{
+		Label: label,
+		Score: score,
+		Image: base64.StdEncoding.EncodeToString(image),
+	}
+
+	postBody, err := json.Marshal(bodyStruct)
+	if err != nil {
+		log.Println("Error marshaling struct into json for POST.")
+		return
+	}
+
+	req, err := http.NewRequest("POST", config.WebHook.URL, bytes.NewBuffer(postBody))
+	if err != nil {
+		log.Println("Error creating HTTP POST Request for WebHook.", err.Error())
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+
+	log.Println("POSTed WebHook, Status: ", resp.Status)
 }
