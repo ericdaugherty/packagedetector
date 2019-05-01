@@ -19,6 +19,8 @@ image:
   url: http://192.168.1.10/snap.jpeg
   # The filename/path to use to cache the image. If omitted ./img.jpg will be used.
   cachefile: img.jpeg
+  # The path to use if you want to archive all images. If omitted, images will not be archived.
+  archivepath: ./
   # Rect defines the image points to use to crop the image. Cropped image will be from x1,y1 to x2,y2.
   rect:
     x1: 0

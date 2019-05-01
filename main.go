@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"strings"
 	"time"
 
@@ -50,9 +51,10 @@ type runCfg struct {
 }
 
 type imageCfg struct {
-	URL       string
-	CacheFile string
-	Rect      rectCfg
+	URL         string
+	CacheFile   string
+	ArchivePath string
+	Rect        rectCfg
 }
 
 type rectCfg struct {
@@ -131,6 +133,12 @@ func (i imageCfg) isCropSpecified() bool {
 func (i imageCfg) initialize() {
 	if i.CacheFile == "" {
 		i.CacheFile = "./img.jpg"
+	}
+
+	if i.ArchivePath != "" {
+		if _, err := os.Stat(i.ArchivePath); os.IsNotExist(err) {
+			log.Fatalln("The specified ArchivePath does not exist.", i.ArchivePath)
+		}
 	}
 
 	if i.URL == "" {
@@ -382,6 +390,9 @@ func evaluateImageJSON(token string) (visionResponse, error) {
 	}
 
 	ioutil.WriteFile(config.Image.CacheFile, b, 0644)
+	if config.Image.ArchivePath != "" {
+		ioutil.WriteFile(path.Join(config.Image.ArchivePath, time.Now().Format(time.RFC3339)+".jpeg"), b, 0644)
+	}
 
 	return response, nil
 }
