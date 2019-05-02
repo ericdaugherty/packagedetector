@@ -33,6 +33,8 @@ vision:
   authfile: /pd/package-detector-abc1235abc123.json
   url: https://automl.googleapis.com/v1beta1/projects/package-detector/locations/us-central1/models/ICN1122334455667788:predict
   packagelabel: package
+  # The level of confidence % 
+  threshold: 75
 
 # Specify the email configuration to enable an email whenever motion is detected.
 email:

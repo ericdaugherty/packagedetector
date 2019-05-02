@@ -73,6 +73,7 @@ type visionCfg struct {
 	AuthFile     string
 	URL          string
 	PackageLabel string
+	Threshold    int
 }
 
 type emailCfg struct {
@@ -298,8 +299,8 @@ func processImage(ctx context.Context, forceNotify bool) {
 	}
 
 	for _, p := range resp.Payload {
-		log.Printf("Result: %v, Confidence: %f\n", p.DisplayName, p.Classification.Score)
-		if p.DisplayName == config.Vision.PackageLabel {
+		log.Printf("Result: %v, Confidence: %f Threshold: .%d\n", p.DisplayName, p.Classification.Score, config.Vision.Threshold)
+		if p.DisplayName == config.Vision.PackageLabel && ((p.Classification.Score * 100) > float64(config.Vision.Threshold)) {
 			if time.Now().After(lastNotificationSent.Add(time.Duration(config.Run.NotifyMuteMinutes) * time.Minute)) {
 				lastNotificationSent = time.Now()
 				if config.Email.Server != "" {
