@@ -34,12 +34,13 @@ var buf bytes.Buffer
 var lastNotificationSent time.Time
 
 type configuration struct {
-	Run     runCfg
-	Motion  motionCfg
-	Image   imageCfg
-	Vision  visionCfg
-	Email   emailCfg
-	WebHook webhookCfg
+	Run        runCfg
+	Motion     motionCfg
+	Image      imageCfg
+	Vision     visionCfg
+	Email      emailCfg
+	WebHook    webhookCfg
+	ServerMute serverMuteCfg
 }
 
 type runCfg struct {
@@ -89,13 +90,17 @@ type webhookCfg struct {
 	URL string
 }
 
+type serverMuteCfg struct {
+	URL string
+}
+
 func (r runCfg) run(ctx context.Context) {
 	if r.Interval > 0 {
 		ticker := time.NewTicker(time.Duration(r.Interval) * time.Minute)
 		for {
 			select {
 			case <-ticker.C:
-				if r.isAwake() {
+				if r.isAwake() && !isMuted() {
 					processImage(ctx, false)
 				}
 			case <-ctx.Done():
@@ -163,7 +168,7 @@ func (m motionCfg) initialize(ctx context.Context) {
 			log.Fatal("Unable to open the motion.log file: "+m.LogPath, err.Error())
 		}
 		md.AddStopMotionCallback(m.CameraID, func(string, string) {
-			if config.Run.isAwake() {
+			if config.Run.isAwake() && !isMuted() {
 				processImage(ctx, false)
 			}
 		})
@@ -301,7 +306,7 @@ func processImage(ctx context.Context, forceNotify bool) {
 	for _, p := range resp.Payload {
 		log.Printf("Result: %v, Confidence: %f Threshold: .%d\n", p.DisplayName, p.Classification.Score, config.Vision.Threshold)
 		if p.DisplayName == config.Vision.PackageLabel && ((p.Classification.Score * 100) > float64(config.Vision.Threshold)) {
-			if time.Now().After(lastNotificationSent.Add(time.Duration(config.Run.NotifyMuteMinutes) * time.Minute)) {
+			if !isLocallyMuted() { // We should have checked the server before calling this method.
 				lastNotificationSent = time.Now()
 				if config.Email.Server != "" {
 					emailResult("Package Received!", fmt.Sprintf("A new package delivery was detected."))
@@ -460,4 +465,34 @@ func sendWebHook(score float64, label string, image []byte) {
 	defer resp.Body.Close()
 
 	log.Println("POSTed WebHook, Status: ", resp.Status)
+}
+
+func isLocallyMuted() bool {
+	return !time.Now().After(lastNotificationSent.Add(time.Duration(config.Run.NotifyMuteMinutes) * time.Minute))
+}
+
+/// Checks with Firebase to see if the mobile app has requested to mute notifications.
+func isRemoteMuted() bool {
+
+	if config.ServerMute.URL == "" {
+		return false
+	}
+
+	response, err := http.Get(config.ServerMute.URL)
+	if err != nil {
+		log.Println("Error fetching Server Mute", err.Error())
+		return false
+	}
+	defer response.Body.Close()
+
+	b, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		log.Println("Error reading body of Server Mute", err.Error())
+		return false
+	}
+	return strings.HasPrefix(string(b), "MUTED")
+}
+
+func isMuted() bool {
+	return isLocallyMuted() || isRemoteMuted()
 }
